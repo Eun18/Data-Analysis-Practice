@@ -1,0 +1,258 @@
+---
+title: "Loan Default Analysis and Prediction"
+author: "Eunice Gong"
+output: 
+  html_document: 
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#import libraries
+library(tidyverse) 
+library(knitr) # for kable
+library(psych)
+library(rpivotTable)
+library(caret)
+```
+
+## Motivation
+
+After going through ACC1701X, Accounting for Decision Makers in school, I was curious about how exactly expected credit loss (ECL) was calculated since it was briefly touched on and its calculations were simplified given that it was an introductory module.
+
+On further research, ECL is often calculated using the formula:
+ECL = Probablity of Default(PD) * Exposure at Default(EAD) * Loss Given at Default(LGD)
+
+I am interested in determining PD, hence I found a Loan Default Prediction dataset I could work with on from Datacamp, the dataset I am using is "Raw Credit Data"
+[Loan Default Prediction dataset] (https://app.datacamp.com/learn/courses/credit-risk-modeling-in-python)
+
+Limitations:
+<br>This is a highly simplified dataset on individuals, the calculation of PD for ECL in real life is much more complicated with macroeconomic factors, etc for each company.
+<br>Nonetheless, it still serves as a good practice dataset.
+
+```{r read-dataset}
+credit_data <- read.csv("cr_loan2.csv")
+```
+
+
+## Initial Data Exploration
+
+```{r data-exploration}
+str(credit_data)
+summary(credit_data)
+head(credit_data)
+tail(credit_data)
+any(is.na(credit_data))
+```
+From str(), we gathered that the structure of the data is as follows:
+
+<br>person_age(integer): Borrower's age
+<br>person_income(integer): Borrower's income
+<br>person_home_ownership(character): Borrower's state of home ownership (rent, own, mortgage)
+<br>person_emp_length(integer): Borrower's length of employment
+<br>loan_intent(character): Reason for loan
+<br>loan_grade(character): Grade of loan
+<br>loan_amnt(integer): Principal Amount of loan
+<br>loan_int_rate(numeric): Yearly interest that has to be paid on remaining principal
+<br>loan_status(integer): If the loan is defaulted or not (0 = Not default, 1 = default)
+<br>loan_percent_income(numeric): Percentage of loan compared to income
+<br>cb_person_default_on_file(character): If the person defaulted on a loan before
+<br>cb_person_cred_hist_length(integer): Number of years borrower has held the credit for
+
+
+From summary(), we observe that there are NA values for person_emp_length and loan_int_rate.
+<br>We also observe that max person_age is 144 and max person_emp_length is 123, which is very unlikely because the longest someone has ever lived was till 122 years old. There are outliers in the data possibly caused by errors in data input.
+We have to perform data cleaning to remove or control for NA values and outliers. 
+
+## Data Cleaning
+
+First, we plot a histogram to observe the frequency distribution of person_emp_length
+
+```{r data-cleaning-1}
+hist(credit_data$person_emp_length,
+         main = "Histogram of Borrower's Length of Employment",
+           xlab = "Borrower Length of Employment",
+           ylab = "No. of Borrowers",
+           col = "Orange",
+           ylim = c(0,32000),
+         labels = TRUE, breaks = 26)
+
+hist(credit_data$person_age,
+         main = "Histogram of Borrower's Age",
+           xlab = "Borrower Age",
+           ylab = "No. of Borrowers",
+           col = "Yellow",
+           ylim = c(0,20000),
+         labels = TRUE, breaks = 26)
+
+```
+
+1. For person_emp_length, the missing data is likely to be missing at random (MAR), since some borrowers with shorter employment length may be less likely to disclose their employment length when applying for the loan as a shorter employment length may reduce their chances of receiving the loan.
+
+2. From the histogram above, we observe that the data is likely to be right-skewed.
+Hence to address missing values, I will impute median person_emp_length.
+
+However, due to the presence of outliers which may affect the median of person_emp_length, I will remove outliers before imputing missing values.
+I will set the maximum employment length to be 65.
+
+```{r data-cleaning-2}
+credit_data_clean1 <- filter(credit_data, credit_data$person_emp_length <= 65 | is.na(person_emp_length)) #removes outliers and preserve NA values
+credit_data_cleanm <- filter(credit_data, credit_data$person_emp_length <= 65) #removes outliers and NA values for calculation of median
+emp_len_median <- median(credit_data_cleanm$person_emp_length)
+credit_data_clean2 <- credit_data_clean1 %>% mutate(person_emp_length = ifelse(is.na(person_emp_length), emp_len_median, person_emp_length)) # replaces NA values with median
+```
+
+For loan_int_rate, this should have been set by the loaner. The data might be missing due to errors in data input by employees, missing completely at random (MCAR). 
+
+Because there are 3116 observations missing, which makes up roughly 10% of the dataset, replacing NA values with median might skew the data, which is undesirable as loan_int_rate is potentially a crucial variable for determining probability of default, leading to false conclusions.
+<br>Since the dataset is large, and considering the bias by imputation, we chose to remove rows containing NA values. While there is a slight reduction of data size which may lead to a slight bias in our analysis, overall it ensures integrity of the data.
+
+```{r data-cleaning-3}
+credit_data_clean3 <- filter(credit_data_clean2, !is.na(loan_int_rate))
+```
+
+Next, I will remove outliers for person_age. I will set the maximum age to be 100.
+
+```{r data-cleaning-4}
+credit_data_cleaned <- filter(credit_data_clean3, credit_data_clean3$person_age <= 100)
+```
+
+Finally, we plot the histograms again to check if the data has been appropriately cleaned.
+
+```{r data-cleaning-5}
+hist(credit_data_cleaned$person_emp_length,
+         main = "Histogram of Borrower's Length of Employment",
+           xlab = "Borrower Length of Employment",
+           ylab = "No. of Borrowers",
+           col = "Orange",
+           ylim = c(0,10000),
+         labels = TRUE, breaks = 26)
+
+hist(credit_data_cleaned$person_age,
+         main = "Histogram of Borrower's Age",
+           xlab = "Borrower Age",
+           ylab = "No. of Borrowers",
+           col = "Yellow",
+           ylim = c(0,7000),
+         labels = TRUE, breaks = 26)
+
+```
+
+From the above histograms, we observe that most borrowers are between the ages of 20-30 and have been employed for less than 10 years.
+This seems reasonable most likely because young people would have less savings as they would still be studying or have just started working, and would need to borrow to finance their college fees, apartment fees, and when they start a family. 
+
+## Data Visualization
+
+
+```{r data-visualization}
+home_ownership_freq <- credit_data_cleaned %>% count(person_home_ownership)
+slice_home <- home_ownership_freq$n #n column in House 
+home_piepercent <- 100*round(home_ownership_freq$n/ sum(home_ownership_freq$n),3 )
+label <- paste(home_ownership_freq$person_home_ownership, 
+               ", ", 
+               home_piepercent,
+               "% ", sep = "")
+#label <- paste(label, ",", sep="") default of sep is " "
+
+pie(slice_home, labels = label, col=c("Red", "Green", "Blue", "Pink"), radius = 1 , main ="Pie Chart of Home Ownership Frequency Distribution")
+
+```
+
+From the pie chart, we observe that more than half (50.5%) of the borrowers rent their houses and 41.1% are still paying for mortgage for their houses. This is also reasonable given the young demographics, most would not have the financial ability to own their homes. We also expect people who own their own homes to be more financially stable and hence would be less likely to take out a loan.
+
+```{r data-visualization-scatterplot}
+
+
+rpivotTable(credit_data_cleaned, rows ="loan_status", cols=c("loan_grade","cb_person_default_on_file"),aggregatorName = "Count as Fraction of Columns")
+```
+
+Those who have no prior records of defaulting received either a loan grade of A or B for their current loan.
+The percentage of those who default on their loans are higher for lower grades.
+
+
+```{r data-visualization-boxplot}
+boxplot(credit_data_cleaned$loan_percent_income~credit_data_cleaned$loan_status,
+        col = "blue", 
+        xlab = "Loan Status",
+        ylab = "Loan as a Percentage of Income")
+```
+
+From the boxplot, we observe that those who have defaulted on their loans generally have a higher loan_percent_income.
+
+``` {r data-visualization-stackedbarplot}
+credit_intent_percent <- credit_data_cleaned %>% group_by(loan_intent) %>% summarize(total_loans = n(),
+  default_loans = sum(loan_status == 1)
+)%>%  mutate(percent_of_total_loans = round(total_loans *100 / sum(total_loans),2),
+            default_percent = round(default_loans *100 / total_loans,2) )
+kable(credit_intent_percent)
+
+credit_matrix <- credit_data_cleaned %>% group_by(loan_intent, loan_status) %>% tally()
+credit_matrix_spread <- credit_matrix %>% spread(key = loan_intent, value = n)
+
+bar_matrix <- as.matrix(credit_matrix_spread[,c(2:7)]) 
+bar_col <- c("Blue", "Grey")
+barplot(bar_matrix, col= bar_col, main ="Stacked Bar Plot comparing Frequency of Borrowers by Loan Intent and Loan Status", ylab ="Frequency of Borrowers", ylim = c(0,6000), cex.names = 0.5)
+legend("topright", fill = bar_col, legend = c("Not Defaulted", "Defaulted"), cex = 0.6)
+
+```
+
+We observe that most borrowers took loans for education, but most of these borrowers are able to pay back their loans, since their percentage of loan default is lower compared to other reasons. 
+Loans under medical reasons had the highest number of loan default.
+Debt consolidation had the highest percentage of loan default.
+
+## Modelling
+
+Since we are trying to predict the probability that a borrower would default, we would use a logit model. We use glm() under the psych package.
+
+Observe that loan_percent_income is derived from loan_amount/person_income. Hence these 3 variables are perfectly multicollinear, we have to remove one of them in our model. I have chosen to remove loan_amount.
+
+```{r modelling-fullmod}
+
+pairs.panels(credit_data_cleaned, lm=FALSE)
+
+mod_full <- glm(loan_status ~ person_age + person_income + factor(person_home_ownership) + person_emp_length + factor(loan_intent) + factor(loan_grade) + loan_int_rate + loan_percent_income + factor(cb_person_default_on_file) + cb_person_cred_hist_length, data = credit_data_cleaned, family = "binomial")
+summary(mod_full)
+
+```
+
+From the pairs panel, we observe that loan_grade and loan_int_rate are highly correlated because loan_int_rate is dependent on loan_grade and other variables.
+
+
+From the full model, we observe that there are some variables with coefficients which are not statistically significant at the 5% level of significance because their p-value is less than 0.05. 
+<br> To improve the model's predictive performance and intepretability, I have chosen to use the forward stepwise model selection procedure. 
+
+
+```{r modelling-}
+mod_init <- glm(loan_status ~ 1, data = credit_data_cleaned)
+mod_forward <- step(mod_init, scope = formula(mod_full), direction = 'forward')
+summary(mod_forward)
+```
+The final model is mod_forward.
+
+To use the model to predict probability of default for an individual, 
+you can use the code 
+predicted <- predict(mod_forward, newdata = new_data, type = "response"),
+where new_data is the data frame containing the required information: loan_grade, loan_percent_income, person_home_ownership, loan_intent, person_income, person_emp_length, loan_int_rate, person_age, cb_person_cred_hist_length
+
+
+```{r model-testing}
+
+set.seed(123)
+
+sample_index <- sample(1:nrow(credit_data_cleaned), size = 0.2 * nrow(credit_data_cleaned))
+test_data <- credit_data_cleaned[sample_index, ]
+
+predicted <- predict(mod_forward, newdata = test_data, type = "response")
+actual <- factor(test_data$loan_status, levels = c(0, 1))
+predicted_binary <- factor(ifelse(predicted > 0.5, 1, 0), levels = c(0, 1))
+
+confusionMatrix(data = predicted_binary, reference = actual,positive = "1")
+
+```
+
+## Note
+
+This in a work in progress.
+<br> I will be adding on better prediction models in the future when I learn about them in my free time 
+
